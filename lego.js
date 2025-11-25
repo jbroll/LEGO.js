@@ -32,6 +32,7 @@ const SPLINE_LENGTH = 0.25;                // Length of interior wall splines
 const SPLINE_THICKNESS = 0.7;              // Thickness of interior wall splines
 const REINFORCING_WIDTH = 0.7;             // Width of reinforcement cross-braces
 const ROOF_THICKNESS = 1;                  // Thickness of top surface
+const BASEPLATE_HEIGHT = 1.3;              // Height unit for baseplates (vs 9.6 for bricks)
 
 // Technic hole dimensions
 const HORIZONTAL_HOLE_DIAMETER = 4.8;      // Diameter of Technic axle holes
@@ -62,8 +63,8 @@ const getParameterDefinitions = () => [
   {
     name: 'type',
     type: 'choice',
-    values: ['brick', 'tile'],
-    captions: ['Brick (with studs)', 'Tile (smooth top)'],
+    values: ['brick', 'tile', 'baseplate'],
+    captions: ['Brick (with studs)', 'Tile (smooth top)', 'Baseplate (thin solid)'],
     initial: 'brick',
     caption: 'Type:'
   },
@@ -101,7 +102,17 @@ const getParameterDefinitions = () => [
 // =============================================================================
 
 const computeRealHeight = (type, height) => {
-  return Math.max(1/3, height);
+  // Baseplates have minimum height of 1, regular bricks/tiles allow 1/3 (plate height)
+  const minHeight = type === 'baseplate' ? 1 : 1/3;
+  return Math.max(minHeight, height);
+};
+
+/**
+ * Get the block height unit based on type
+ * Baseplates use 1.3mm per unit, regular bricks use 9.6mm
+ */
+const computeBlockHeightUnit = (type) => {
+  return type === 'baseplate' ? BASEPLATE_HEIGHT : BLOCK_HEIGHT;
 };
 
 const computeTotalStudsWidth = (count, studDiameter) => {
@@ -269,6 +280,100 @@ const createBlockBody = (overallLength, overallWidth, blockHeightMm, bottomType)
   });
 
   return subtract(outer, inner);
+};
+
+/**
+ * Create rounded corner subtractions for baseplate
+ * Following OpenSCAD: negative_rounded_corner subtracts a cube minus a cylinder
+ * r = (stud_spacing / 2) - wall_play = 3.9mm
+ */
+const createBaseplateCornerSubtractions = (overallLength, overallWidth, blockHeightMm, segments) => {
+  const r = (STUD_SPACING / 2) - WALL_PLAY;  // Corner radius = 3.9mm
+  const h = blockHeightMm;
+
+  // Each corner is a cube with a quarter-cylinder cut out
+  // We subtract these from each corner of the baseplate
+  const corners = [];
+
+  // Create one corner subtraction shape (cube minus quarter cylinder)
+  const createCornerShape = () => {
+    const cube = cuboid({
+      size: [r + 1, r + 1, h + 1],
+      center: [(r + 1) / 2, (r + 1) / 2, (h + 1) / 2 - 0.5]
+    });
+    const cyl = cylinder({
+      radius: r,
+      height: h + 2,
+      segments: segments,
+      center: [0, 0, (h + 2) / 2 - 1]
+    });
+    return subtract(cube, cyl);
+  };
+
+  const cornerShape = createCornerShape();
+
+  // Corner 1: top-right (overall_length, overall_width) - no rotation needed
+  // Positioned at (overallLength - r, overallWidth - r)
+  const corner1 = translate([overallLength - r, overallWidth - r, 0], cornerShape);
+  corners.push(corner1);
+
+  // Corner 2: top-left (0, overall_width) - rotate 90 degrees
+  // In OpenSCAD: translate([0, overall_width, 0]) translate([r, -r, 0]) rotate([0,0,90])
+  const corner2Shape = createCornerShape();
+  // For 90 degree rotation, the shape extends in -X and +Y direction from origin
+  // We need to use rotateZ which isn't imported, so let's manually position
+  // Actually, we can create rotated shapes by swapping coordinates
+  const createCornerShape90 = () => {
+    const cube = cuboid({
+      size: [r + 1, r + 1, h + 1],
+      center: [-(r + 1) / 2, (r + 1) / 2, (h + 1) / 2 - 0.5]
+    });
+    const cyl = cylinder({
+      radius: r,
+      height: h + 2,
+      segments: segments,
+      center: [0, 0, (h + 2) / 2 - 1]
+    });
+    return subtract(cube, cyl);
+  };
+  const corner2 = translate([r, overallWidth - r, 0], createCornerShape90());
+  corners.push(corner2);
+
+  // Corner 3: bottom-left (0, 0) - rotate 180 degrees
+  const createCornerShape180 = () => {
+    const cube = cuboid({
+      size: [r + 1, r + 1, h + 1],
+      center: [-(r + 1) / 2, -(r + 1) / 2, (h + 1) / 2 - 0.5]
+    });
+    const cyl = cylinder({
+      radius: r,
+      height: h + 2,
+      segments: segments,
+      center: [0, 0, (h + 2) / 2 - 1]
+    });
+    return subtract(cube, cyl);
+  };
+  const corner3 = translate([r, r, 0], createCornerShape180());
+  corners.push(corner3);
+
+  // Corner 4: bottom-right (overall_length, 0) - rotate 270 degrees
+  const createCornerShape270 = () => {
+    const cube = cuboid({
+      size: [r + 1, r + 1, h + 1],
+      center: [(r + 1) / 2, -(r + 1) / 2, (h + 1) / 2 - 0.5]
+    });
+    const cyl = cylinder({
+      radius: r,
+      height: h + 2,
+      segments: segments,
+      center: [0, 0, (h + 2) / 2 - 1]
+    });
+    return subtract(cube, cyl);
+  };
+  const corner4 = translate([overallLength - r, r, 0], createCornerShape270());
+  corners.push(corner4);
+
+  return union(...corners);
 };
 
 /**
@@ -670,23 +775,28 @@ const block = (params) => {
   const realHeight = computeRealHeight(type, height);
 
   // Calculate overall dimensions in mm
+  // Baseplates use different height unit (1.3mm vs 9.6mm)
+  const blockHeightUnit = computeBlockHeightUnit(type);
   const overallLength = (realLength * STUD_SPACING) - (2 * WALL_PLAY);
   const overallWidth = (realWidth * STUD_SPACING) - (2 * WALL_PLAY);
-  const blockHeightMm = realHeight * BLOCK_HEIGHT;
+  const blockHeightMm = realHeight * blockHeightUnit;
+
+  // Baseplates are always solid (closed bottom)
+  const effectiveBottomType = type === 'baseplate' ? 'closed' : bottomType;
 
   // Build the brick parts
   const parts = [];
 
   // 1. Main body
-  parts.push(createBlockBody(overallLength, overallWidth, blockHeightMm, bottomType));
+  parts.push(createBlockBody(overallLength, overallWidth, blockHeightMm, effectiveBottomType));
 
   // 2. Studs (unless tile type)
   if (type !== 'tile') {
     parts.push(createStuds(realWidth, realLength, blockHeightMm, studType, studRescale, segments, studTopRoundness));
   }
 
-  // 3. Interior features (only for open bottom)
-  if (bottomType === 'open') {
+  // 3. Interior features (only for open bottom, not baseplates)
+  if (effectiveBottomType === 'open') {
     // Wall splines
     if (includeSplines) {
       const splines = createSplines(realWidth, realLength, blockHeightMm, overallLength, overallWidth);
@@ -704,8 +814,8 @@ const block = (params) => {
       const pins = createPins(realWidth, realLength, blockHeightMm, overallLength, overallWidth, segments);
       if (pins) parts.push(pins);
 
-      // Reinforcement (optional)
-      if (useReinforcement && type !== 'tile') {
+      // Reinforcement (optional, not for tiles or baseplates)
+      if (useReinforcement && type !== 'tile' && type !== 'baseplate') {
         const reinforcement = createReinforcement(realWidth, realLength, blockHeightMm, overallLength, overallWidth, segments);
         if (reinforcement) parts.push(reinforcement);
       }
@@ -722,15 +832,23 @@ const block = (params) => {
   let result = union(...parts);
 
   // 4. Subtract Technic horizontal holes (after union, so holes cut through everything)
-  if (horizontalHoles && realHeight >= 1) {
+  // For baseplates, require height >= 8 (matching OpenSCAD)
+  const horizontalHolesMinHeight = type === 'baseplate' ? 8 : 1;
+  if (horizontalHoles && realHeight >= horizontalHolesMinHeight) {
     const holes = createHorizontalHoles(realWidth, realLength, Math.floor(realHeight), overallLength, overallWidth, segments);
     if (holes) result = subtract(result, holes);
   }
 
   // 5. Subtract vertical axle holes through the roof (posts already have holes, but need to cut roof too)
-  if (verticalAxleHoles && realWidth > 1 && realLength > 1) {
+  if (verticalAxleHoles && realWidth > 1 && realLength > 1 && type !== 'baseplate') {
     const axleHoles = createVerticalAxleHoleSubtractions(realWidth, realLength, realHeight, overallLength, overallWidth);
     if (axleHoles) result = subtract(result, axleHoles);
+  }
+
+  // 6. Subtract rounded corners for baseplates
+  if (type === 'baseplate') {
+    const cornerSubtractions = createBaseplateCornerSubtractions(overallLength, overallWidth, blockHeightMm, segments);
+    result = subtract(result, cornerSubtractions);
   }
 
   // Center on X/Y axes (matching OpenSCAD LEGO.scad behavior)
