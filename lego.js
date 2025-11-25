@@ -12,7 +12,6 @@ const { cuboid, cylinder, circle } = jscad.primitives;
 const { subtract, union } = jscad.booleans;
 const { translate, rotateX } = jscad.transforms;
 const { extrudeRotate } = jscad.extrusions;
-const { hull } = jscad.hulls;
 
 // =============================================================================
 // LEGO Dimensions (mm) - Standard LEGO brick measurements
@@ -115,18 +114,85 @@ const computeBlockHeightUnit = (type) => {
   return type === 'baseplate' ? BASEPLATE_HEIGHT : BLOCK_HEIGHT;
 };
 
-const computeTotalStudsWidth = (count, studDiameter) => {
-  return (studDiameter * count) + ((count - 1) * (STUD_SPACING - studDiameter));
+/**
+ * Compute the total span width for a row of items with given diameter and count
+ * For studs: all items are placed, so span = count items
+ * For interior items (posts/pins): placed between studs, so span = count-1 items
+ */
+const computeTotalSpan = (diameter, count, isInterior = false) => {
+  const itemCount = isInterior ? count - 1 : count;
+  if (itemCount <= 0) return 0;
+  return (diameter * itemCount) + ((itemCount - 1) * (STUD_SPACING - diameter));
 };
 
-const computeTotalPostsWidth = (count) => {
-  if (count <= 1) return 0;
-  return (POST_DIAMETER * (count - 1)) + ((count - 2) * (STUD_SPACING - POST_DIAMETER));
+/**
+ * Compute grid offsets for interior features (posts, axle holes, reinforcement)
+ * These are positioned between studs, so we use (count - 1) items
+ */
+const computeInteriorGridOffsets = (diameter, countX, countY, overallLength, overallWidth) => {
+  const totalLength = computeTotalSpan(diameter, countX, true);
+  const totalWidth = computeTotalSpan(diameter, countY, true);
+  return {
+    offsetX: (diameter / 2) + (overallLength - totalLength) / 2,
+    offsetY: (diameter / 2) + (overallWidth - totalWidth) / 2
+  };
 };
 
-const computeTotalPinsWidth = (count) => {
-  if (count <= 1) return 0;
-  return (PIN_DIAMETER * (count - 1)) + Math.max(0, (count - 2) * (STUD_SPACING - PIN_DIAMETER));
+/**
+ * Iterate over interior grid positions (between studs)
+ * Calls callback(posX, posY, x, y) for each position
+ */
+const forEachInteriorGridPosition = (realWidth, realLength, offsetX, offsetY, callback) => {
+  const results = [];
+  for (let y = 1; y < realWidth; y++) {
+    for (let x = 1; x < realLength; x++) {
+      const posX = offsetX + ((x - 1) * STUD_SPACING);
+      const posY = offsetY + ((y - 1) * STUD_SPACING);
+      const result = callback(posX, posY, x, y);
+      if (result) results.push(result);
+    }
+  }
+  return results;
+};
+
+/**
+ * Create a cross-shaped axle hole
+ * @param {number} holeHeight - Height of the hole
+ * @param {number} centerZ - Z center position of the hole
+ */
+const createAxleCross = (holeHeight, centerZ = null) => {
+  const z = centerZ !== null ? centerZ : holeHeight / 2;
+  const hBar = cuboid({
+    size: [AXLE_DIAMETER, AXLE_SPLINE_WIDTH, holeHeight],
+    center: [0, 0, z]
+  });
+  const vBar = cuboid({
+    size: [AXLE_SPLINE_WIDTH, AXLE_DIAMETER, holeHeight],
+    center: [0, 0, z]
+  });
+  return union(hBar, vBar);
+};
+
+/**
+ * Create a corner subtraction shape for baseplates (cube minus quarter cylinder)
+ * @param {number} signX - Sign for X offset (-1 or 1)
+ * @param {number} signY - Sign for Y offset (-1 or 1)
+ * @param {number} r - Corner radius
+ * @param {number} h - Height
+ * @param {number} segments - Number of cylinder segments
+ */
+const createCornerShape = (signX, signY, r, h, segments) => {
+  const cube = cuboid({
+    size: [r + 1, r + 1, h + 1],
+    center: [signX * (r + 1) / 2, signY * (r + 1) / 2, (h + 1) / 2 - 0.5]
+  });
+  const cyl = cylinder({
+    radius: r,
+    height: h + 2,
+    segments: segments,
+    center: [0, 0, (h + 2) / 2 - 1]
+  });
+  return subtract(cube, cyl);
 };
 
 // =============================================================================
@@ -231,8 +297,8 @@ const createStud = (studType, studRescale, segments, studTopRoundness = 0) => {
  */
 const createStuds = (realWidth, realLength, blockHeightMm, studType, studRescale, segments, studTopRoundness = 0) => {
   const scaledDiameter = STUD_DIAMETER * studRescale;
-  const totalStudsLength = computeTotalStudsWidth(realLength, scaledDiameter);
-  const totalStudsWidth = computeTotalStudsWidth(realWidth, scaledDiameter);
+  const totalStudsLength = computeTotalSpan(scaledDiameter, realLength);
+  const totalStudsWidth = computeTotalSpan(scaledDiameter, realWidth);
   const overallLength = (realLength * STUD_SPACING) - (2 * WALL_PLAY);
   const overallWidth = (realWidth * STUD_SPACING) - (2 * WALL_PLAY);
 
@@ -289,89 +355,18 @@ const createBlockBody = (overallLength, overallWidth, blockHeightMm, bottomType)
  */
 const createBaseplateCornerSubtractions = (overallLength, overallWidth, blockHeightMm, segments) => {
   const r = (STUD_SPACING / 2) - WALL_PLAY;  // Corner radius = 3.9mm
-  const h = blockHeightMm;
 
-  // Each corner is a cube with a quarter-cylinder cut out
-  // We subtract these from each corner of the baseplate
-  const corners = [];
+  // Define corner positions and orientations: [translateX, translateY, signX, signY]
+  const cornerConfigs = [
+    [overallLength - r, overallWidth - r, 1, 1],   // top-right
+    [r, overallWidth - r, -1, 1],                   // top-left
+    [r, r, -1, -1],                                 // bottom-left
+    [overallLength - r, r, 1, -1]                   // bottom-right
+  ];
 
-  // Create one corner subtraction shape (cube minus quarter cylinder)
-  const createCornerShape = () => {
-    const cube = cuboid({
-      size: [r + 1, r + 1, h + 1],
-      center: [(r + 1) / 2, (r + 1) / 2, (h + 1) / 2 - 0.5]
-    });
-    const cyl = cylinder({
-      radius: r,
-      height: h + 2,
-      segments: segments,
-      center: [0, 0, (h + 2) / 2 - 1]
-    });
-    return subtract(cube, cyl);
-  };
-
-  const cornerShape = createCornerShape();
-
-  // Corner 1: top-right (overall_length, overall_width) - no rotation needed
-  // Positioned at (overallLength - r, overallWidth - r)
-  const corner1 = translate([overallLength - r, overallWidth - r, 0], cornerShape);
-  corners.push(corner1);
-
-  // Corner 2: top-left (0, overall_width) - rotate 90 degrees
-  // In OpenSCAD: translate([0, overall_width, 0]) translate([r, -r, 0]) rotate([0,0,90])
-  const corner2Shape = createCornerShape();
-  // For 90 degree rotation, the shape extends in -X and +Y direction from origin
-  // We need to use rotateZ which isn't imported, so let's manually position
-  // Actually, we can create rotated shapes by swapping coordinates
-  const createCornerShape90 = () => {
-    const cube = cuboid({
-      size: [r + 1, r + 1, h + 1],
-      center: [-(r + 1) / 2, (r + 1) / 2, (h + 1) / 2 - 0.5]
-    });
-    const cyl = cylinder({
-      radius: r,
-      height: h + 2,
-      segments: segments,
-      center: [0, 0, (h + 2) / 2 - 1]
-    });
-    return subtract(cube, cyl);
-  };
-  const corner2 = translate([r, overallWidth - r, 0], createCornerShape90());
-  corners.push(corner2);
-
-  // Corner 3: bottom-left (0, 0) - rotate 180 degrees
-  const createCornerShape180 = () => {
-    const cube = cuboid({
-      size: [r + 1, r + 1, h + 1],
-      center: [-(r + 1) / 2, -(r + 1) / 2, (h + 1) / 2 - 0.5]
-    });
-    const cyl = cylinder({
-      radius: r,
-      height: h + 2,
-      segments: segments,
-      center: [0, 0, (h + 2) / 2 - 1]
-    });
-    return subtract(cube, cyl);
-  };
-  const corner3 = translate([r, r, 0], createCornerShape180());
-  corners.push(corner3);
-
-  // Corner 4: bottom-right (overall_length, 0) - rotate 270 degrees
-  const createCornerShape270 = () => {
-    const cube = cuboid({
-      size: [r + 1, r + 1, h + 1],
-      center: [(r + 1) / 2, -(r + 1) / 2, (h + 1) / 2 - 0.5]
-    });
-    const cyl = cylinder({
-      radius: r,
-      height: h + 2,
-      segments: segments,
-      center: [0, 0, (h + 2) / 2 - 1]
-    });
-    return subtract(cube, cyl);
-  };
-  const corner4 = translate([overallLength - r, r, 0], createCornerShape270());
-  corners.push(corner4);
+  const corners = cornerConfigs.map(([tx, ty, signX, signY]) =>
+    translate([tx, ty, 0], createCornerShape(signX, signY, r, blockHeightMm, segments))
+  );
 
   return union(...corners);
 };
@@ -381,37 +376,29 @@ const createBaseplateCornerSubtractions = (overallLength, overallWidth, blockHei
  */
 const createSplines = (realWidth, realLength, blockHeightMm, overallLength, overallWidth) => {
   const splines = [];
+  const basePos = (STUD_SPACING / 2) - WALL_PLAY - (SPLINE_THICKNESS / 2);
+  const nearWall = WALL_THICKNESS + SPLINE_LENGTH / 2;
 
+  // Front/back splines (along X axis)
   for (let x = 0; x < realLength; x++) {
-    const posX = (STUD_SPACING / 2) - WALL_PLAY - (SPLINE_THICKNESS / 2) + (x * STUD_SPACING);
-
-    const frontSpline = cuboid({
-      size: [SPLINE_THICKNESS, SPLINE_LENGTH, blockHeightMm],
-      center: [posX + SPLINE_THICKNESS / 2, WALL_THICKNESS + SPLINE_LENGTH / 2, blockHeightMm / 2]
+    const posX = basePos + (x * STUD_SPACING) + SPLINE_THICKNESS / 2;
+    [nearWall, overallWidth - nearWall].forEach(posY => {
+      splines.push(cuboid({
+        size: [SPLINE_THICKNESS, SPLINE_LENGTH, blockHeightMm],
+        center: [posX, posY, blockHeightMm / 2]
+      }));
     });
-    splines.push(frontSpline);
-
-    const backSpline = cuboid({
-      size: [SPLINE_THICKNESS, SPLINE_LENGTH, blockHeightMm],
-      center: [posX + SPLINE_THICKNESS / 2, overallWidth - WALL_THICKNESS - SPLINE_LENGTH / 2, blockHeightMm / 2]
-    });
-    splines.push(backSpline);
   }
 
+  // Left/right splines (along Y axis)
   for (let y = 0; y < realWidth; y++) {
-    const posY = (STUD_SPACING / 2) - WALL_PLAY - (SPLINE_THICKNESS / 2) + (y * STUD_SPACING);
-
-    const leftSpline = cuboid({
-      size: [SPLINE_LENGTH, SPLINE_THICKNESS, blockHeightMm],
-      center: [WALL_THICKNESS + SPLINE_LENGTH / 2, posY + SPLINE_THICKNESS / 2, blockHeightMm / 2]
+    const posY = basePos + (y * STUD_SPACING) + SPLINE_THICKNESS / 2;
+    [nearWall, overallLength - nearWall].forEach(posX => {
+      splines.push(cuboid({
+        size: [SPLINE_LENGTH, SPLINE_THICKNESS, blockHeightMm],
+        center: [posX, posY, blockHeightMm / 2]
+      }));
     });
-    splines.push(leftSpline);
-
-    const rightSpline = cuboid({
-      size: [SPLINE_LENGTH, SPLINE_THICKNESS, blockHeightMm],
-      center: [overallLength - WALL_THICKNESS - SPLINE_LENGTH / 2, posY + SPLINE_THICKNESS / 2, blockHeightMm / 2]
-    });
-    splines.push(rightSpline);
   }
 
   return splines.length > 0 ? union(...splines) : null;
@@ -435,20 +422,8 @@ const createPost = (blockHeightMm, realHeight, segments, hasAxleHole = false) =>
   if (hasAxleHole) {
     // Cross-shaped axle hole (like Technic bricks)
     const holeHeight = (realHeight + 1) * BLOCK_HEIGHT;
-
-    // Horizontal bar of cross
-    const hBar = cuboid({
-      size: [AXLE_DIAMETER, AXLE_SPLINE_WIDTH, holeHeight],
-      center: [0, 0, holeHeight / 2 - BLOCK_HEIGHT / 2]
-    });
-
-    // Vertical bar of cross
-    const vBar = cuboid({
-      size: [AXLE_SPLINE_WIDTH, AXLE_DIAMETER, holeHeight],
-      center: [0, 0, holeHeight / 2 - BLOCK_HEIGHT / 2]
-    });
-
-    return subtract(outer, union(hBar, vBar));
+    const axleCross = createAxleCross(holeHeight, holeHeight / 2 - BLOCK_HEIGHT / 2);
+    return subtract(outer, axleCross);
   } else {
     // Standard round hollow post
     const inner = cylinder({
@@ -457,7 +432,6 @@ const createPost = (blockHeightMm, realHeight, segments, hasAxleHole = false) =>
       segments: segments,
       center: [0, 0, blockHeightMm / 2]
     });
-
     return subtract(outer, inner);
   }
 };
@@ -468,35 +442,25 @@ const createPost = (blockHeightMm, realHeight, segments, hasAxleHole = false) =>
 const createPosts = (realWidth, realLength, blockHeightMm, realHeight, overallLength, overallWidth, segments, verticalAxleHoles = false) => {
   if (realWidth <= 1 || realLength <= 1) return null;
 
-  const posts = [];
+  const { offsetX, offsetY } = computeInteriorGridOffsets(POST_DIAMETER, realLength, realWidth, overallLength, overallWidth);
+  const post = createPost(blockHeightMm, realHeight, segments, verticalAxleHoles);
 
-  const totalPostsLength = computeTotalPostsWidth(realLength);
-  const totalPostsWidth = computeTotalPostsWidth(realWidth);
+  const posts = forEachInteriorGridPosition(realWidth, realLength, offsetX, offsetY, (posX, posY) =>
+    translate([posX, posY, 0], post)
+  );
 
-  const offsetX = (POST_DIAMETER / 2) + (overallLength - totalPostsLength) / 2;
-  const offsetY = (POST_DIAMETER / 2) + (overallWidth - totalPostsWidth) / 2;
-
-  for (let y = 1; y < realWidth; y++) {
-    for (let x = 1; x < realLength; x++) {
-      const posX = offsetX + ((x - 1) * STUD_SPACING);
-      const posY = offsetY + ((y - 1) * STUD_SPACING);
-      const post = createPost(blockHeightMm, realHeight, segments, verticalAxleHoles);
-      posts.push(translate([posX, posY, 0], post));
-    }
-  }
-
-  return posts.length > 0 ? union(...posts) : null;
+  return union(...posts);
 };
 
 /**
- * Create pins for 1-wide bricks
+ * Create pins for 1-wide bricks (exactly one dimension must be 1, not both)
  */
 const createPins = (realWidth, realLength, blockHeightMm, overallLength, overallWidth, segments) => {
-  if ((realWidth !== 1 && realLength !== 1) || (realWidth === 1 && realLength === 1)) {
-    return null;
-  }
+  // Pins only for bricks where exactly one dimension is 1
+  const isOneWide = realWidth === 1 && realLength > 1;
+  const isOneLong = realLength === 1 && realWidth > 1;
+  if (!isOneWide && !isOneLong) return null;
 
-  const pins = [];
   const pin = cylinder({
     radius: PIN_DIAMETER / 2,
     height: blockHeightMm,
@@ -504,25 +468,22 @@ const createPins = (realWidth, realLength, blockHeightMm, overallLength, overall
     center: [0, 0, blockHeightMm / 2]
   });
 
-  if (realWidth === 1 && realLength > 1) {
-    const totalPinsLength = computeTotalPinsWidth(realLength);
-    const offsetX = (PIN_DIAMETER / 2) + (overallLength - totalPinsLength) / 2;
+  // Determine which axis to place pins along
+  const count = isOneWide ? realLength : realWidth;
+  const overallSize = isOneWide ? overallLength : overallWidth;
+  const fixedPos = isOneWide ? overallWidth / 2 : overallLength / 2;
 
-    for (let x = 1; x < realLength; x++) {
-      const posX = offsetX + ((x - 1) * STUD_SPACING);
-      pins.push(translate([posX, overallWidth / 2, 0], pin));
-    }
-  } else if (realLength === 1 && realWidth > 1) {
-    const totalPinsWidth = computeTotalPinsWidth(realWidth);
-    const offsetY = (PIN_DIAMETER / 2) + (overallWidth - totalPinsWidth) / 2;
+  const totalSpan = computeTotalSpan(PIN_DIAMETER, count, true);
+  const offset = (PIN_DIAMETER / 2) + (overallSize - totalSpan) / 2;
 
-    for (let y = 1; y < realWidth; y++) {
-      const posY = offsetY + ((y - 1) * STUD_SPACING);
-      pins.push(translate([overallLength / 2, posY, 0], pin));
-    }
+  const pins = [];
+  for (let i = 1; i < count; i++) {
+    const pos = offset + ((i - 1) * STUD_SPACING);
+    const position = isOneWide ? [pos, fixedPos, 0] : [fixedPos, pos, 0];
+    pins.push(translate(position, pin));
   }
 
-  return pins.length > 0 ? union(...pins) : null;
+  return union(...pins);
 };
 
 /**
@@ -531,178 +492,109 @@ const createPins = (realWidth, realLength, blockHeightMm, overallLength, overall
 const createReinforcement = (realWidth, realLength, blockHeightMm, overallLength, overallWidth, segments) => {
   if (realWidth <= 1 || realLength <= 1) return null;
 
-  const reinforcements = [];
-
-  const totalPostsLength = computeTotalPostsWidth(realLength);
-  const totalPostsWidth = computeTotalPostsWidth(realWidth);
-
-  const offsetX = (POST_DIAMETER / 2) + (overallLength - totalPostsLength) / 2;
-  const offsetY = (POST_DIAMETER / 2) + (overallWidth - totalPostsWidth) / 2;
-
+  const { offsetX, offsetY } = computeInteriorGridOffsets(POST_DIAMETER, realLength, realWidth, overallLength, overallWidth);
   const crossLength = 2 * (STUD_SPACING - (2 * WALL_PLAY));
 
-  for (let y = 1; y < realWidth; y++) {
-    for (let x = 1; x < realLength; x++) {
-      const posX = offsetX + ((x - 1) * STUD_SPACING);
-      const posY = offsetY + ((y - 1) * STUD_SPACING);
-
-      const hBar = cuboid({
-        size: [crossLength, REINFORCING_WIDTH, blockHeightMm],
-        center: [posX, posY, blockHeightMm / 2]
-      });
-      reinforcements.push(hBar);
-
-      const vBar = cuboid({
-        size: [REINFORCING_WIDTH, crossLength, blockHeightMm],
-        center: [posX, posY, blockHeightMm / 2]
-      });
-      reinforcements.push(vBar);
-    }
-  }
-
-  if (reinforcements.length === 0) return null;
+  // Create cross-braces at each interior grid position
+  const reinforcements = forEachInteriorGridPosition(realWidth, realLength, offsetX, offsetY, (posX, posY) => {
+    const hBar = cuboid({
+      size: [crossLength, REINFORCING_WIDTH, blockHeightMm],
+      center: [posX, posY, blockHeightMm / 2]
+    });
+    const vBar = cuboid({
+      size: [REINFORCING_WIDTH, crossLength, blockHeightMm],
+      center: [posX, posY, blockHeightMm / 2]
+    });
+    return union(hBar, vBar);
+  });
 
   let result = union(...reinforcements);
 
   // Subtract post cylinders from reinforcement to avoid overlap
-  for (let y = 1; y < realWidth; y++) {
-    for (let x = 1; x < realLength; x++) {
-      const posX = offsetX + ((x - 1) * STUD_SPACING);
-      const posY = offsetY + ((y - 1) * STUD_SPACING);
-
-      const postHole = cylinder({
-        radius: (POST_DIAMETER / 2) - 0.1,
-        height: blockHeightMm + 1,
-        segments: segments,
-        center: [posX, posY, (blockHeightMm + 1) / 2 - 0.5]
-      });
-      result = subtract(result, postHole);
-    }
-  }
+  forEachInteriorGridPosition(realWidth, realLength, offsetX, offsetY, (posX, posY) => {
+    const postHole = cylinder({
+      radius: (POST_DIAMETER / 2) - 0.1,
+      height: blockHeightMm + 1,
+      segments: segments,
+      center: [posX, posY, (blockHeightMm + 1) / 2 - 0.5]
+    });
+    result = subtract(result, postHole);
+  });
 
   return result;
+};
+
+/**
+ * Iterate over horizontal hole positions
+ * Calls callback(posX, posZ, heightIndex, holeIndex) for each position
+ */
+const forEachHorizontalHolePosition = (realLength, height, overallLength, callback) => {
+  const totalStudsLength = computeTotalSpan(STUD_DIAMETER, realLength);
+  const baseOffset = (overallLength - totalStudsLength) / 2;
+
+  // 1-length bricks: hole is under the stud; >1-length: holes are between studs
+  const xOffset = (HORIZONTAL_HOLE_DIAMETER / 2) + (realLength === 1 ? 0 : (STUD_SPACING / 2));
+  const endIndex = realLength === 1 ? realLength - 1 : realLength - 2;
+
+  const results = [];
+  for (let heightIndex = 0; heightIndex < height; heightIndex++) {
+    for (let holeIndex = 0; holeIndex <= endIndex; holeIndex++) {
+      const posX = xOffset + baseOffset + (holeIndex * STUD_SPACING);
+      const posZ = (heightIndex * BLOCK_HEIGHT) + HORIZONTAL_HOLE_Z_OFFSET;
+      const result = callback(posX, posZ, heightIndex, holeIndex);
+      if (result) results.push(result);
+    }
+  }
+  return results;
+};
+
+/**
+ * Create a Y-axis aligned cylinder (rotated from Z-axis)
+ */
+const createYAxisCylinder = (radius, length, posX, posY, posZ, segments) => {
+  const cyl = cylinder({
+    radius: radius,
+    height: length,
+    segments: segments,
+    center: [0, 0, 0]
+  });
+  return translate([posX, posY, posZ], rotateX(Math.PI / 2, cyl));
 };
 
 /**
  * Create Technic horizontal hole supports (solid cylinders that will have holes subtracted)
  * These run through the brick perpendicular to the length direction (along Y axis)
  */
-const createHorizontalHoleSupports = (realWidth, realLength, height, overallLength, overallWidth, segments) => {
-  const supports = [];
-  const scaledDiameter = STUD_DIAMETER;
-  const totalStudsLength = computeTotalStudsWidth(realLength, scaledDiameter);
-
-  // Support cylinder radius = hole radius + wall thickness
+const createHorizontalHoleSupports = (realLength, height, overallLength, overallWidth, segments) => {
   const supportRadius = (HORIZONTAL_HOLE_DIAMETER / 2) + HORIZONTAL_HOLE_WALL_THICKNESS;
 
-  // Calculate x offset for hole positions
-  // 1-length bricks: hole is under the stud
-  // >1-length bricks: holes are between studs
-  const xOffset = (HORIZONTAL_HOLE_DIAMETER / 2) +
-    (realLength === 1 ? 0 : (STUD_SPACING / 2));
+  const supports = forEachHorizontalHolePosition(realLength, height, overallLength, (posX, posZ) =>
+    createYAxisCylinder(supportRadius, overallWidth, posX, overallWidth / 2, posZ, segments)
+  );
 
-  const baseOffset = (overallLength - totalStudsLength) / 2;
-
-  // Determine hole indices
-  const startIndex = 0;
-  const endIndex = realLength === 1 ? realLength - 1 : realLength - 2;
-
-  // Create supports for each height level and hole position
-  for (let heightIndex = 0; heightIndex < height; heightIndex++) {
-    for (let holeIndex = startIndex; holeIndex <= endIndex; holeIndex++) {
-      const posX = xOffset + baseOffset + (holeIndex * STUD_SPACING);
-      const posZ = (heightIndex * BLOCK_HEIGHT) + HORIZONTAL_HOLE_Z_OFFSET;
-
-      // Create cylinder centered at origin (spans -h/2 to +h/2 on Z)
-      const support = cylinder({
-        radius: supportRadius,
-        height: overallWidth,
-        segments: segments,
-        center: [0, 0, 0]
-      });
-
-      // Rotate 90 degrees around X: Z axis becomes Y axis
-      // After rotation, cylinder spans -h/2 to +h/2 on Y
-      const rotated = rotateX(Math.PI / 2, support);
-
-      // Translate so cylinder runs from Y=0 to Y=overallWidth, at correct X and Z
-      const positioned = translate([posX, overallWidth / 2, posZ], rotated);
-
-      supports.push(positioned);
-    }
-  }
-
-  return supports.length > 0 ? union(...supports) : null;
+  return union(...supports);
 };
 
 /**
  * Create the actual Technic holes to subtract (including bevels)
  */
-const createHorizontalHoles = (realWidth, realLength, height, overallLength, overallWidth, segments) => {
-  const holes = [];
-  const scaledDiameter = STUD_DIAMETER;
-  const totalStudsLength = computeTotalStudsWidth(realLength, scaledDiameter);
-
+const createHorizontalHoles = (realLength, height, overallLength, overallWidth, segments) => {
   const holeRadius = HORIZONTAL_HOLE_DIAMETER / 2;
   const bevelRadius = HORIZONTAL_HOLE_BEVEL_DIAMETER / 2;
+  const bevelLength = HORIZONTAL_HOLE_BEVEL_DEPTH + 0.1;
 
-  // Calculate x offset
-  const xOffset = (HORIZONTAL_HOLE_DIAMETER / 2) +
-    (realLength === 1 ? 0 : (STUD_SPACING / 2));
+  const holes = forEachHorizontalHolePosition(realLength, height, overallLength, (posX, posZ) => {
+    // Main hole cylinder
+    const mainHole = createYAxisCylinder(holeRadius, overallWidth + 0.2, posX, overallWidth / 2, posZ, segments);
 
-  const baseOffset = (overallLength - totalStudsLength) / 2;
+    // Front and back bevels
+    const frontBevel = createYAxisCylinder(bevelRadius, bevelLength, posX, bevelLength / 2, posZ, segments);
+    const backBevel = createYAxisCylinder(bevelRadius, bevelLength, posX, overallWidth - bevelLength / 2, posZ, segments);
 
-  // Determine hole indices
-  const startIndex = 0;
-  const endIndex = realLength === 1 ? realLength - 1 : realLength - 2;
+    return union(mainHole, frontBevel, backBevel);
+  });
 
-  for (let heightIndex = 0; heightIndex < height; heightIndex++) {
-    for (let holeIndex = startIndex; holeIndex <= endIndex; holeIndex++) {
-      const posX = xOffset + baseOffset + (holeIndex * STUD_SPACING);
-      const posZ = (heightIndex * BLOCK_HEIGHT) + HORIZONTAL_HOLE_Z_OFFSET;
-
-      // Main hole cylinder (runs along Y axis through entire brick width)
-      const mainHoleCyl = cylinder({
-        radius: holeRadius,
-        height: overallWidth + 0.2,  // Slightly longer to ensure clean cut
-        segments: segments,
-        center: [0, 0, 0]
-      });
-      const mainHole = translate(
-        [posX, overallWidth / 2, posZ],
-        rotateX(Math.PI / 2, mainHoleCyl)
-      );
-      holes.push(mainHole);
-
-      // Front bevel (Y = 0 side)
-      const frontBevelCyl = cylinder({
-        radius: bevelRadius,
-        height: HORIZONTAL_HOLE_BEVEL_DEPTH + 0.1,
-        segments: segments,
-        center: [0, 0, 0]
-      });
-      const frontBevel = translate(
-        [posX, (HORIZONTAL_HOLE_BEVEL_DEPTH + 0.1) / 2, posZ],
-        rotateX(Math.PI / 2, frontBevelCyl)
-      );
-      holes.push(frontBevel);
-
-      // Back bevel (Y = overallWidth side)
-      const backBevelCyl = cylinder({
-        radius: bevelRadius,
-        height: HORIZONTAL_HOLE_BEVEL_DEPTH + 0.1,
-        segments: segments,
-        center: [0, 0, 0]
-      });
-      const backBevel = translate(
-        [posX, overallWidth - (HORIZONTAL_HOLE_BEVEL_DEPTH + 0.1) / 2, posZ],
-        rotateX(Math.PI / 2, backBevelCyl)
-      );
-      holes.push(backBevel);
-    }
-  }
-
-  return holes.length > 0 ? union(...holes) : null;
+  return union(...holes);
 };
 
 /**
@@ -710,41 +602,17 @@ const createHorizontalHoles = (realWidth, realLength, height, overallLength, ove
  * The posts already have axle holes, but this cuts through the top surface
  */
 const createVerticalAxleHoleSubtractions = (realWidth, realLength, realHeight, overallLength, overallWidth) => {
-  const holes = [];
-
-  // Calculate positioning (same as posts - between studs)
-  const totalAxlesLength = (AXLE_DIAMETER * (realLength - 1)) + ((realLength - 2) * (STUD_SPACING - AXLE_DIAMETER));
-  const totalAxlesWidth = (AXLE_DIAMETER * (realWidth - 1)) + ((realWidth - 2) * (STUD_SPACING - AXLE_DIAMETER));
-
-  const offsetX = (AXLE_DIAMETER / 2) + (overallLength - totalAxlesLength) / 2;
-  const offsetY = (AXLE_DIAMETER / 2) + (overallWidth - totalAxlesWidth) / 2;
+  const { offsetX, offsetY } = computeInteriorGridOffsets(AXLE_DIAMETER, realLength, realWidth, overallLength, overallWidth);
 
   // Height extends through entire brick plus extra (matching OpenSCAD: (real_height+1)*block_height)
   const holeHeight = (realHeight + 1) * BLOCK_HEIGHT;
-  // Center Z offset (matching OpenSCAD: translate -block_height/2, then center at (real_height+1)*block_height/2)
   const centerZ = holeHeight / 2 - BLOCK_HEIGHT / 2;
 
-  for (let y = 1; y < realWidth; y++) {
-    for (let x = 1; x < realLength; x++) {
-      const posX = offsetX + ((x - 1) * STUD_SPACING);
-      const posY = offsetY + ((y - 1) * STUD_SPACING);
+  const holes = forEachInteriorGridPosition(realWidth, realLength, offsetX, offsetY, (posX, posY) =>
+    translate([posX, posY, 0], createAxleCross(holeHeight, centerZ))
+  );
 
-      // Cross shape: two perpendicular rectangles
-      const hBar = cuboid({
-        size: [AXLE_DIAMETER, AXLE_SPLINE_WIDTH, holeHeight],
-        center: [posX, posY, centerZ]
-      });
-
-      const vBar = cuboid({
-        size: [AXLE_SPLINE_WIDTH, AXLE_DIAMETER, holeHeight],
-        center: [posX, posY, centerZ]
-      });
-
-      holes.push(hBar, vBar);
-    }
-  }
-
-  return holes.length > 0 ? union(...holes) : null;
+  return union(...holes);
 };
 
 // =============================================================================
@@ -823,8 +691,7 @@ const block = (params) => {
 
     // Technic horizontal hole supports (solid cylinders running through brick)
     if (horizontalHoles && realHeight >= 1) {
-      const holeSupports = createHorizontalHoleSupports(realWidth, realLength, Math.floor(realHeight), overallLength, overallWidth, segments);
-      if (holeSupports) parts.push(holeSupports);
+      parts.push(createHorizontalHoleSupports(realLength, Math.floor(realHeight), overallLength, overallWidth, segments));
     }
   }
 
@@ -835,14 +702,12 @@ const block = (params) => {
   // For baseplates, require height >= 8 (matching OpenSCAD)
   const horizontalHolesMinHeight = type === 'baseplate' ? 8 : 1;
   if (horizontalHoles && realHeight >= horizontalHolesMinHeight) {
-    const holes = createHorizontalHoles(realWidth, realLength, Math.floor(realHeight), overallLength, overallWidth, segments);
-    if (holes) result = subtract(result, holes);
+    result = subtract(result, createHorizontalHoles(realLength, Math.floor(realHeight), overallLength, overallWidth, segments));
   }
 
   // 5. Subtract vertical axle holes through the roof (posts already have holes, but need to cut roof too)
   if (verticalAxleHoles && realWidth > 1 && realLength > 1 && type !== 'baseplate') {
-    const axleHoles = createVerticalAxleHoleSubtractions(realWidth, realLength, realHeight, overallLength, overallWidth);
-    if (axleHoles) result = subtract(result, axleHoles);
+    result = subtract(result, createVerticalAxleHoleSubtractions(realWidth, realLength, realHeight, overallLength, overallWidth));
   }
 
   // 6. Subtract rounded corners for baseplates
