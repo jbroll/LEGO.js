@@ -40,6 +40,10 @@ const HORIZONTAL_HOLE_BEVEL_DIAMETER = 6.2; // Diameter of hole bevel/chamfer
 const HORIZONTAL_HOLE_BEVEL_DEPTH = 0.9;   // Depth of bevel on each side
 const HORIZONTAL_HOLE_WALL_THICKNESS = 1;  // Wall thickness around holes
 
+// Vertical axle hole dimensions (cross-shaped)
+const AXLE_DIAMETER = 5;                   // Overall diameter of axle hole
+const AXLE_SPLINE_WIDTH = 2;               // Width of the cross arms
+
 // =============================================================================
 // Parameter Definitions - Generates the JSCAD parametric UI
 // =============================================================================
@@ -81,6 +85,7 @@ const getParameterDefinitions = () => [
   },
 
   { name: 'horizontalHoles', type: 'checkbox', checked: false, caption: 'Technic Holes:' },
+  { name: 'verticalAxleHoles', type: 'checkbox', checked: false, caption: 'Axle Holes:' },
 
   { name: 'advanced', type: 'group', caption: 'Advanced' },
   { name: 'includeSplines', type: 'checkbox', checked: true, caption: 'Wall Splines:' },
@@ -309,8 +314,12 @@ const createSplines = (realWidth, realLength, blockHeightMm, overallLength, over
 
 /**
  * Create a single interior support post
+ * @param {number} blockHeightMm - Height of the brick in mm
+ * @param {number} realHeight - Height ratio (1 = standard brick)
+ * @param {number} segments - Number of segments for cylinders
+ * @param {boolean} hasAxleHole - If true, creates cross-shaped hole; if false, round hollow
  */
-const createPost = (blockHeightMm, segments) => {
+const createPost = (blockHeightMm, realHeight, segments, hasAxleHole = false) => {
   const outer = cylinder({
     radius: POST_DIAMETER / 2,
     height: blockHeightMm,
@@ -318,24 +327,43 @@ const createPost = (blockHeightMm, segments) => {
     center: [0, 0, blockHeightMm / 2]
   });
 
-  const inner = cylinder({
-    radius: (POST_DIAMETER / 2) - POST_WALL_THICKNESS,
-    height: blockHeightMm + 0.1,
-    segments: segments,
-    center: [0, 0, blockHeightMm / 2]
-  });
+  if (hasAxleHole) {
+    // Cross-shaped axle hole (like Technic bricks)
+    const holeHeight = (realHeight + 1) * BLOCK_HEIGHT;
 
-  return subtract(outer, inner);
+    // Horizontal bar of cross
+    const hBar = cuboid({
+      size: [AXLE_DIAMETER, AXLE_SPLINE_WIDTH, holeHeight],
+      center: [0, 0, holeHeight / 2 - BLOCK_HEIGHT / 2]
+    });
+
+    // Vertical bar of cross
+    const vBar = cuboid({
+      size: [AXLE_SPLINE_WIDTH, AXLE_DIAMETER, holeHeight],
+      center: [0, 0, holeHeight / 2 - BLOCK_HEIGHT / 2]
+    });
+
+    return subtract(outer, union(hBar, vBar));
+  } else {
+    // Standard round hollow post
+    const inner = cylinder({
+      radius: (POST_DIAMETER / 2) - POST_WALL_THICKNESS,
+      height: blockHeightMm + 0.1,
+      segments: segments,
+      center: [0, 0, blockHeightMm / 2]
+    });
+
+    return subtract(outer, inner);
+  }
 };
 
 /**
  * Create interior posts for blocks wider than 1 stud
  */
-const createPosts = (realWidth, realLength, blockHeightMm, overallLength, overallWidth, segments) => {
+const createPosts = (realWidth, realLength, blockHeightMm, realHeight, overallLength, overallWidth, segments, verticalAxleHoles = false) => {
   if (realWidth <= 1 || realLength <= 1) return null;
 
   const posts = [];
-  const post = createPost(blockHeightMm, segments);
 
   const totalPostsLength = computeTotalPostsWidth(realLength);
   const totalPostsWidth = computeTotalPostsWidth(realWidth);
@@ -347,6 +375,7 @@ const createPosts = (realWidth, realLength, blockHeightMm, overallLength, overal
     for (let x = 1; x < realLength; x++) {
       const posX = offsetX + ((x - 1) * STUD_SPACING);
       const posY = offsetY + ((y - 1) * STUD_SPACING);
+      const post = createPost(blockHeightMm, realHeight, segments, verticalAxleHoles);
       posts.push(translate([posX, posY, 0], post));
     }
   }
@@ -571,6 +600,48 @@ const createHorizontalHoles = (realWidth, realLength, height, overallLength, ove
   return holes.length > 0 ? union(...holes) : null;
 };
 
+/**
+ * Create vertical axle hole subtractions (to cut through the roof/top of the brick)
+ * The posts already have axle holes, but this cuts through the top surface
+ */
+const createVerticalAxleHoleSubtractions = (realWidth, realLength, realHeight, overallLength, overallWidth) => {
+  const holes = [];
+
+  // Calculate positioning (same as posts - between studs)
+  const totalAxlesLength = (AXLE_DIAMETER * (realLength - 1)) + ((realLength - 2) * (STUD_SPACING - AXLE_DIAMETER));
+  const totalAxlesWidth = (AXLE_DIAMETER * (realWidth - 1)) + ((realWidth - 2) * (STUD_SPACING - AXLE_DIAMETER));
+
+  const offsetX = (AXLE_DIAMETER / 2) + (overallLength - totalAxlesLength) / 2;
+  const offsetY = (AXLE_DIAMETER / 2) + (overallWidth - totalAxlesWidth) / 2;
+
+  // Height extends through entire brick plus extra (matching OpenSCAD: (real_height+1)*block_height)
+  const holeHeight = (realHeight + 1) * BLOCK_HEIGHT;
+  // Center Z offset (matching OpenSCAD: translate -block_height/2, then center at (real_height+1)*block_height/2)
+  const centerZ = holeHeight / 2 - BLOCK_HEIGHT / 2;
+
+  for (let y = 1; y < realWidth; y++) {
+    for (let x = 1; x < realLength; x++) {
+      const posX = offsetX + ((x - 1) * STUD_SPACING);
+      const posY = offsetY + ((y - 1) * STUD_SPACING);
+
+      // Cross shape: two perpendicular rectangles
+      const hBar = cuboid({
+        size: [AXLE_DIAMETER, AXLE_SPLINE_WIDTH, holeHeight],
+        center: [posX, posY, centerZ]
+      });
+
+      const vBar = cuboid({
+        size: [AXLE_SPLINE_WIDTH, AXLE_DIAMETER, holeHeight],
+        center: [posX, posY, centerZ]
+      });
+
+      holes.push(hBar, vBar);
+    }
+  }
+
+  return holes.length > 0 ? union(...holes) : null;
+};
+
 // =============================================================================
 // Main Block Function
 // =============================================================================
@@ -584,6 +655,7 @@ const block = (params) => {
     studType = 'solid',
     bottomType = 'open',
     horizontalHoles = false,
+    verticalAxleHoles = false,
     includeSplines = true,
     withPosts = true,
     useReinforcement = false,
@@ -624,7 +696,8 @@ const block = (params) => {
     // Interior supports
     if (withPosts) {
       // Posts (for multi-stud width and length)
-      const posts = createPosts(realWidth, realLength, blockHeightMm, overallLength, overallWidth, segments);
+      // If verticalAxleHoles is enabled, posts get cross-shaped holes instead of round hollow
+      const posts = createPosts(realWidth, realLength, blockHeightMm, realHeight, overallLength, overallWidth, segments, verticalAxleHoles);
       if (posts) parts.push(posts);
 
       // Pins (for 1-wide bricks)
@@ -652,6 +725,12 @@ const block = (params) => {
   if (horizontalHoles && realHeight >= 1) {
     const holes = createHorizontalHoles(realWidth, realLength, Math.floor(realHeight), overallLength, overallWidth, segments);
     if (holes) result = subtract(result, holes);
+  }
+
+  // 5. Subtract vertical axle holes through the roof (posts already have holes, but need to cut roof too)
+  if (verticalAxleHoles && realWidth > 1 && realLength > 1) {
+    const axleHoles = createVerticalAxleHoleSubtractions(realWidth, realLength, realHeight, overallLength, overallWidth);
+    if (axleHoles) result = subtract(result, axleHoles);
   }
 
   // Center on X/Y axes (matching OpenSCAD LEGO.scad behavior)
