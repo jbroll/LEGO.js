@@ -2,6 +2,8 @@
 
 A JSCAD library for generating LEGO-compatible brick geometry.
 
+**[Live Demo](https://jscad.app/#https://raw.githubusercontent.com/jbroll/LEGO.js/refs/heads/master/lego.js)**
+
 This is a JavaScript port of [LEGO.scad](https://github.com/cfinke/LEGO.scad), the OpenSCAD LEGO-compatible brick generator. The JS version implements a subset of the OpenSCAD functionality, supporting brick, tile, and baseplate types.
 
 ## Usage
