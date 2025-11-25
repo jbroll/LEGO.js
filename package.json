@@ -1,0 +1,25 @@
+{
+  "name": "lego.scad",
+  "version": "1.0.0",
+  "description": "An OpenSCAD LEGO-compatible brick generator.",
+  "main": "lego.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cfinke/LEGO.scad.git"
+  },
+  "keywords": [],
+  "author": "John Roll",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/cfinke/LEGO.scad/issues"
+  },
+  "homepage": "https://github.com/cfinke/LEGO.scad#readme",
+  "dependencies": {
+    "@jscad/modeling": "^2.12.6",
+    "@jscad/stl-serializer": "^2.1.21"
+  }
+}
