@@ -87,7 +87,7 @@ const getParameterDefinitions = () => [
   { name: 'horizontalHoles', type: 'checkbox', checked: false, caption: 'Technic Holes:' },
   { name: 'verticalAxleHoles', type: 'checkbox', checked: false, caption: 'Axle Holes:' },
 
-  { name: 'advanced', type: 'group', caption: 'Advanced' },
+  { name: 'advanced', type: 'group', caption: 'Advanced', initial: 'closed' },
   { name: 'includeSplines', type: 'checkbox', checked: true, caption: 'Wall Splines:' },
   { name: 'withPosts', type: 'checkbox', checked: true, caption: 'Interior Posts:' },
   { name: 'useReinforcement', type: 'checkbox', checked: false, caption: 'Reinforcement:' },
